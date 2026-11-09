@@ -10,8 +10,10 @@ from tempfile import NamedTemporaryFile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from route_map import RouteMap
 
-def parse_route(value):
+
+def parse_route(value, *, minimum_points=2, deduplicate=True):
     points = []
     for line_number, line in enumerate(value.splitlines(), 1):
         if not line.strip():
@@ -23,11 +25,36 @@ def parse_route(value):
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise ValueError(f"第 {line_number} 行的座標超出範圍。")
         point = (lat, lon)
-        if not points or points[-1] != point:
+        if not deduplicate or not points or points[-1] != point:
             points.append(point)
-    if len(points) < 2:
+    if len(points) < minimum_points:
         raise ValueError("請輸入至少兩個不同的座標，每行一個。")
     return points
+
+
+def parse_hold_point(value):
+    points = parse_route(value, minimum_points=0, deduplicate=False)
+    if len(points) != 1:
+        raise ValueError("請輸入一組定點座標，格式為「緯度, 經度」。")
+    return points[0]
+
+
+def format_point(point):
+    latitude, longitude = point
+    return f"{latitude}, {longitude}"
+
+
+def write_json(path, data):
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
 def route_segments(points, speed_kmh):
@@ -62,11 +89,21 @@ def interpolate(lat, lon, bearing, arc):
     return math.degrees(next_lat), (math.degrees(next_lon) + 180) % 360 - 180
 
 
-async def play_route(location, first_point, segments, stop, status):
+async def play_route(location, first_point, segments, stop, status, *, hold=False):
     try:
         if stop.is_set():
             return False
         await asyncio.wait_for(location.set(*first_point), timeout=8)
+        if hold:
+            status("正在定點停留 · 按「停止並恢復」可結束")
+            ticks = 0
+            while not stop.is_set():
+                await asyncio.sleep(0.25)
+                ticks += 1
+                if ticks == 20 and not stop.is_set():
+                    await asyncio.wait_for(location.set(*first_point), timeout=8)
+                    ticks = 0
+            return False
         for index, (end, lat, lon, bearing, arc, duration) in enumerate(segments, 1):
             status(f"移動中 · 第 {index}/{len(segments)} 段")
             elapsed = 0.0
@@ -105,12 +142,21 @@ async def run_on_phone(action, points, segments, stop, status):
                 if len(devices) != 1:
                     raise RuntimeError("請用 USB 資料線接上一支已解鎖的 iPhone。一次只接一支。")
                 serial = next(iter(devices))
+                if action == "reveal":
+                    from pymobiledevice3.lockdown import create_using_usbmux
+                    from pymobiledevice3.services.amfi import AmfiService
+
+                    lockdown = await create_using_usbmux(serial=serial, autopair=False)
+                    stack.push_async_callback(lockdown.close)
+                    await AmfiService(lockdown).reveal_developer_mode_option_in_ui()
+                    return "已送出顯示請求。請到 iPhone 的「設定 → 隱私權與安全性」開啟開發者模式。"
                 rsd = await stack.enter_async_context(UserspaceRsdTunnel(serial=serial, remotepairing_fallback=False))
                 dvt = await stack.enter_async_context(DvtProvider(rsd))
                 location = await stack.enter_async_context(LocationSimulation(dvt))
         except InvalidServiceError as error:
             raise RuntimeError(
-                "iPhone 尚未提供所需的開發服務。確認開發者模式已開啟，並依 README 掛載開發者映像。"
+                "iPhone 尚未提供所需的開發服務。若手機上找不到開發者模式，請按「顯示開發者模式」。"
+                "開啟後如仍無法連線，請依 README 掛載開發者映像。"
             ) from error
         except TimeoutError as error:
             raise RuntimeError("連線逾時。請解鎖 iPhone、確認已信任這部電腦，再試一次。") from error
@@ -119,7 +165,7 @@ async def run_on_phone(action, points, segments, stop, status):
         if action == "clear":
             await asyncio.wait_for(location.clear(), timeout=8)
             return "已送出恢復定位指令。請在 Apple 地圖確認。"
-        finished = await play_route(location, points[0], segments, stop, status)
+        finished = await play_route(location, points[0], segments, stop, status, hold=action == "hold")
         result = "路線結束" if finished else "已停止"
         return f"{result}。已送出恢復定位指令，請在 Apple 地圖確認。"
 
@@ -130,47 +176,134 @@ class RouteWindow:
         self.messages = queue.SimpleQueue()
         self.stop = threading.Event()
         self.action = None
+        self.route_map = None
+        self.hold_map = None
         self.closing = False
         self.status = tk.StringVar(value="請接上 iPhone，然後按「檢查連線」。")
-        self.speed = tk.StringVar(value="15")
+        self.speed = tk.StringVar(value="18")
+        self.hold_coordinates = tk.StringVar()
+        self.buttons = {}
 
-        root.title("iPhone 路線模擬器 v0.2")
-        root.minsize(570, 335)
+        root.title("iPhone 路線模擬器 v0.3")
+        root.minsize(640, 525)
         root.protocol("WM_DELETE_WINDOW", self.close)
         body = ttk.Frame(root, padding=18)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="iPhone 路線模擬器", font=("", 16, "bold")).pack(anchor="w")
-        ttk.Label(body, text="路線座標（每行一個，格式為 緯度, 經度）").pack(anchor="w", pady=(12, 4))
-        self.route = tk.Text(body, height=7, width=55, wrap="none")
-        self.route.pack(fill="both", expand=True)
+        connection = ttk.Frame(body)
+        connection.pack(fill="x", pady=(8, 12))
+        self.add_button(connection, "check", "檢查連線", lambda: self.start("check"))
+        self.add_button(connection, "reveal", "顯示開發者模式", lambda: self.start("reveal"))
 
-        settings = ttk.Frame(body)
-        settings.pack(fill="x", pady=10)
+        walking = ttk.LabelFrame(body, text="走路路線", padding=10)
+        walking.pack(fill="both", expand=True)
+        ttk.Label(walking, text="路線座標（每行一組緯度、經度）").pack(anchor="w", pady=(0, 4))
+        self.route = tk.Text(walking, height=6, width=55, wrap="none")
+        self.route.pack(fill="both", expand=True)
+        self.route.bind("<<Modified>>", self.route_text_changed)
+
+        files = ttk.Frame(walking)
+        files.pack(fill="x", pady=(8, 0))
+        self.add_button(files, "load", "載入路線", self.load_route)
+        self.add_button(files, "save", "儲存路線", self.save_route)
+        self.add_button(files, "map", "地圖預覽", self.open_map)
+        self.add_button(files, "clear", "恢復定位", lambda: self.start("clear"))
+
+        settings = ttk.Frame(walking)
+        settings.pack(fill="x", pady=(8, 4))
         ttk.Label(settings, text="速度").pack(side="left")
         ttk.Entry(settings, textvariable=self.speed, width=8).pack(side="left", padx=6)
         ttk.Label(settings, text="km/h").pack(side="left")
 
-        actions = ttk.Frame(body)
-        actions.pack(fill="x")
-        self.buttons = {}
-        for key, label in (("check", "檢查連線"), ("play", "開始路線"), ("clear", "恢復定位")):
-            button = ttk.Button(actions, text=label, command=lambda key=key: self.start(key))
-            button.pack(side="left", padx=(0, 5))
-            self.buttons[key] = button
-        self.stop_button = ttk.Button(actions, text="停止並恢復", command=self.request_stop, state="disabled")
-        self.stop_button.pack(side="left")
+        play = ttk.Frame(walking)
+        play.pack(fill="x")
+        self.add_button(play, "play", "開始路線", lambda: self.start("play"))
 
-        files = ttk.Frame(body)
-        files.pack(fill="x", pady=(8, 0))
-        for key, label, handler in (
-            ("save", "儲存路線", self.save_route),
-            ("load", "載入路線", self.load_route),
-        ):
-            button = ttk.Button(files, text=label, command=handler)
-            button.pack(side="left", padx=(0, 5))
-            self.buttons[key] = button
-        ttk.Label(body, textvariable=self.status, wraplength=525).pack(anchor="w", pady=(12, 0))
+        hold = ttk.LabelFrame(body, text="定點停留", padding=10)
+        hold.pack(fill="x", pady=(10, 0))
+        coordinates = ttk.Frame(hold)
+        coordinates.pack(fill="x")
+        ttk.Label(coordinates, text="定點座標").pack(side="left")
+        ttk.Entry(coordinates, textvariable=self.hold_coordinates, width=28).pack(side="left", padx=6)
+        self.add_button(coordinates, "hold_map", "地圖選點", self.open_hold_map)
+        self.hold_coordinates.trace_add("write", self.refresh_hold_map)
+        hold_actions = ttk.Frame(hold)
+        hold_actions.pack(fill="x", pady=(8, 0))
+        self.add_button(hold_actions, "load_point", "載入定點", self.load_point)
+        self.add_button(hold_actions, "save_point", "儲存定點", self.save_point)
+        self.add_button(hold_actions, "hold", "開始停留", lambda: self.start("hold"))
+
+        footer = ttk.Frame(body)
+        footer.pack(fill="x", pady=(12, 0))
+        self.stop_button = ttk.Button(footer, text="停止並恢復", command=self.request_stop, state="disabled")
+        self.stop_button.pack(side="left", padx=(0, 8))
+        ttk.Label(footer, textvariable=self.status, wraplength=465).pack(side="left")
         root.after(100, self.poll)
+
+    def add_button(self, parent, key, label, handler):
+        button = ttk.Button(parent, text=label, command=handler)
+        button.pack(side="left", padx=(0, 5))
+        self.buttons[key] = button
+
+    def open_map(self):
+        try:
+            points = self.map_points()
+        except ValueError as error:
+            messagebox.showerror("請檢查路線", str(error), parent=self.root)
+            return
+        if self.route_map is None or not self.route_map.winfo_exists():
+            self.route_map = RouteMap(self.root, points, self.apply_map_route)
+        else:
+            self.route_map.set_points(points, fit=True)
+        self.route_map.lift()
+
+    def map_points(self):
+        return parse_route(self.route.get("1.0", "end"), minimum_points=0, deduplicate=False)
+
+    def route_text_changed(self, _event):
+        if self.route.edit_modified():
+            self.route.edit_modified(False)
+            self.refresh_map()
+
+    def refresh_map(self, *, fit=False):
+        if self.route_map is None or not self.route_map.winfo_exists():
+            return
+        try:
+            points = self.map_points()
+        except ValueError:
+            points = []
+        self.route_map.set_points(points, fit=fit)
+
+    def apply_map_route(self, points):
+        try:
+            self.map_points()
+        except ValueError as error:
+            messagebox.showerror("請先修正座標欄", str(error), parent=self.route_map)
+            return False
+        self.route.replace("1.0", "end-1c", "\n".join(map(format_point, points)))
+        return True
+
+    def current_hold_points(self):
+        try:
+            return [parse_hold_point(self.hold_coordinates.get())]
+        except ValueError:
+            return []
+
+    def open_hold_map(self):
+        points = self.current_hold_points()
+        if self.hold_map is None or not self.hold_map.winfo_exists():
+            self.hold_map = RouteMap(self.root, points, self.apply_map_hold, single=True)
+        else:
+            self.hold_map.set_points(points, fit=True)
+        self.hold_map.lift()
+
+    def refresh_hold_map(self, *_args, fit=False):
+        if self.hold_map is not None and self.hold_map.winfo_exists():
+            self.hold_map.set_points(self.current_hold_points(), fit=fit)
+
+    def apply_map_hold(self, points):
+        self.hold_coordinates.set(format_point(points[0]))
+        return True
 
     def validate_route(self, text, speed_text):
         points = parse_route(text)
@@ -183,6 +316,16 @@ class RouteWindow:
             raise ValueError("這條路線沒有可移動的距離。")
         return points, segments
 
+    def route_dialog_directory(self, folder="routes"):
+        app_file = sys.executable if getattr(sys, "frozen", False) else __file__
+        app_dir = Path(app_file).resolve().parent
+        routes_dir = app_dir / folder
+        try:
+            routes_dir.mkdir(exist_ok=True)
+        except OSError:
+            return str(app_dir)
+        return str(routes_dir)
+
     def save_route(self):
         text = self.route.get("1.0", "end").strip()
         speed_text = self.speed.get().strip()
@@ -193,29 +336,26 @@ class RouteWindow:
             return
         filename = filedialog.asksaveasfilename(
             title="儲存路線",
+            initialdir=self.route_dialog_directory(),
             defaultextension=".json",
             filetypes=[("路線檔", "*.json")],
         )
         if not filename:
             return
         path = Path(filename)
-        temporary = None
         try:
-            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
-                temporary = Path(stream.name)
-                json.dump({"coordinates": text, "speed_kmh": speed_text}, stream, ensure_ascii=False, indent=2)
-            temporary.replace(path)
+            write_json(path, {"coordinates": text, "speed_kmh": speed_text})
         except OSError as error:
             messagebox.showerror("儲存失敗", str(error))
             return
-        finally:
-            if temporary is not None:
-                with suppress(OSError):
-                    temporary.unlink(missing_ok=True)
         self.status.set(f"已儲存路線 · {path.name}")
 
     def load_route(self):
-        filename = filedialog.askopenfilename(title="載入路線", filetypes=[("路線檔", "*.json")])
+        filename = filedialog.askopenfilename(
+            title="載入路線",
+            initialdir=self.route_dialog_directory(),
+            filetypes=[("路線檔", "*.json")],
+        )
         if not filename:
             return
         path = Path(filename)
@@ -237,6 +377,55 @@ class RouteWindow:
         self.route.insert("1.0", text)
         self.speed.set(speed_text)
         self.status.set(f"已載入路線 · {path.name}")
+        self.refresh_map(fit=True)
+
+    def save_point(self):
+        try:
+            point = parse_hold_point(self.hold_coordinates.get())
+        except ValueError as error:
+            messagebox.showerror("請檢查定點", str(error), parent=self.root)
+            return
+        filename = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="命名並儲存定點",
+            initialdir=self.route_dialog_directory("points"),
+            defaultextension=".json",
+            filetypes=[("定點檔", "*.json")],
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            write_json(path, {"type": "hold_point", "coordinates": format_point(point)})
+        except OSError as error:
+            messagebox.showerror("儲存定點失敗", str(error), parent=self.root)
+            return
+        self.status.set(f"已儲存定點 · {path.stem}")
+
+    def load_point(self):
+        filename = filedialog.askopenfilename(
+            parent=self.root,
+            title="載入定點",
+            initialdir=self.route_dialog_directory("points"),
+            filetypes=[("定點檔", "*.json")],
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict) or data.get("type") != "hold_point":
+                raise ValueError("請選擇用「儲存定點」建立的檔案。")
+            coordinates = data.get("coordinates")
+            if not isinstance(coordinates, str):
+                raise ValueError("找不到有效的定點座標。")
+            point = parse_hold_point(coordinates)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("載入定點失敗", str(error), parent=self.root)
+            return
+        self.hold_coordinates.set(format_point(point))
+        self.refresh_hold_map(fit=True)
+        self.status.set(f"已載入定點 · {path.stem}")
 
     def start(self, action):
         if self.action:
@@ -248,11 +437,17 @@ class RouteWindow:
             except ValueError as error:
                 messagebox.showerror("請檢查路線或速度", str(error))
                 return
+        elif action == "hold":
+            try:
+                points = [parse_hold_point(self.hold_coordinates.get())]
+            except ValueError as error:
+                messagebox.showerror("請檢查定點", str(error), parent=self.root)
+                return
         self.action = action
         self.stop.clear()
         for button in self.buttons.values():
             button.configure(state="disabled")
-        if action == "play":
+        if action in ("play", "hold"):
             self.stop_button.configure(state="normal")
         self.status.set("正在連接 iPhone…")
         threading.Thread(target=self.work, args=(action, points, segments), daemon=True).start()
@@ -274,7 +469,7 @@ class RouteWindow:
         self.status.set("正在停止，請保持 iPhone 連線…")
 
     def close(self):
-        if self.action == "play":
+        if self.action in ("play", "hold"):
             self.closing = True
             self.request_stop()
         elif self.action:
