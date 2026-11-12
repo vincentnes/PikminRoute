@@ -178,72 +178,214 @@ class RouteWindow:
         self.action = None
         self.route_map = None
         self.hold_map = None
+        self.editor_window = None
         self.closing = False
         self.status = tk.StringVar(value="請接上 iPhone，然後按「檢查連線」。")
         self.speed = tk.StringVar(value="18")
         self.hold_coordinates = tk.StringVar()
         self.buttons = {}
 
-        root.title("iPhone 路線模擬器 v0.3")
-        root.minsize(640, 525)
+        root.title("iPhone 路線模擬器 v0.5")
+        root.geometry("450x470")
+        root.minsize(450, 470)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        body = ttk.Frame(root, padding=18)
+        body = ttk.Frame(root, padding=8)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="iPhone 路線模擬器", font=("", 16, "bold")).pack(anchor="w")
+        ttk.Label(body, text="iPhone 路線模擬器", font=("Noto Sans TC", 14, "bold")).pack(anchor="w")
         connection = ttk.Frame(body)
-        connection.pack(fill="x", pady=(8, 12))
+        connection.pack(fill="x", pady=(4, 6))
         self.add_button(connection, "check", "檢查連線", lambda: self.start("check"))
         self.add_button(connection, "reveal", "顯示開發者模式", lambda: self.start("reveal"))
 
-        walking = ttk.LabelFrame(body, text="走路路線", padding=10)
+        walking = tk.LabelFrame(
+            body, text="走路路線", foreground="#355f8c", borderwidth=0,
+            highlightbackground="#a9c9ed", highlightcolor="#a9c9ed", highlightthickness=2,
+            relief="flat", padx=6, pady=5, font=("Noto Sans TC", 9, "bold"),
+        )
         walking.pack(fill="both", expand=True)
-        ttk.Label(walking, text="路線座標（每行一組緯度、經度）").pack(anchor="w", pady=(0, 4))
-        self.route = tk.Text(walking, height=6, width=55, wrap="none")
-        self.route.pack(fill="both", expand=True)
-        self.route.bind("<<Modified>>", self.route_text_changed)
+        heading = ttk.Frame(walking)
+        heading.pack(fill="x", pady=(0, 3))
+        ttk.Label(heading, text="路線座標（緯度, 經度）").pack(side="left")
+        self.add_button(heading, "detach", "獨立視窗", self.toggle_editor)
+        self.editor_host = ttk.Frame(walking)
+        self.editor_host.pack(fill="both", expand=True)
+        self.editor_placeholder = ttk.Label(self.editor_host, text="座標已在獨立視窗顯示", anchor="center")
+        self.create_route_editor(self.editor_host)
 
         files = ttk.Frame(walking)
-        files.pack(fill="x", pady=(8, 0))
+        files.pack(fill="x", pady=(4, 0))
         self.add_button(files, "load", "載入路線", self.load_route)
         self.add_button(files, "save", "儲存路線", self.save_route)
         self.add_button(files, "map", "地圖預覽", self.open_map)
-        self.add_button(files, "clear", "恢復定位", lambda: self.start("clear"))
 
         settings = ttk.Frame(walking)
-        settings.pack(fill="x", pady=(8, 4))
+        settings.pack(fill="x", pady=(4, 0))
         ttk.Label(settings, text="速度").pack(side="left")
-        ttk.Entry(settings, textvariable=self.speed, width=8).pack(side="left", padx=6)
+        ttk.Entry(settings, textvariable=self.speed, width=5).pack(side="left", padx=4)
         ttk.Label(settings, text="km/h").pack(side="left")
 
-        play = ttk.Frame(walking)
-        play.pack(fill="x")
-        self.add_button(play, "play", "開始路線", lambda: self.start("play"))
+        play = ttk.Frame(settings)
+        play.pack(side="left", padx=(8, 0))
+        self.add_button(play, "play", "開始種花路線", lambda: self.start("play"))
 
-        hold = ttk.LabelFrame(body, text="定點停留", padding=10)
-        hold.pack(fill="x", pady=(10, 0))
+        hold = tk.LabelFrame(
+            body, text="定點停留", foreground="#355f8c", borderwidth=0,
+            highlightbackground="#a9c9ed", highlightcolor="#a9c9ed", highlightthickness=2,
+            relief="flat", padx=6, pady=5, font=("Noto Sans TC", 9, "bold"),
+        )
+        hold.pack(fill="x", pady=(6, 0))
         coordinates = ttk.Frame(hold)
         coordinates.pack(fill="x")
         ttk.Label(coordinates, text="定點座標").pack(side="left")
-        ttk.Entry(coordinates, textvariable=self.hold_coordinates, width=28).pack(side="left", padx=6)
+        ttk.Entry(coordinates, textvariable=self.hold_coordinates, width=1).pack(
+            side="left", fill="x", expand=True, padx=4
+        )
         self.add_button(coordinates, "hold_map", "地圖選點", self.open_hold_map)
         self.hold_coordinates.trace_add("write", self.refresh_hold_map)
         hold_actions = ttk.Frame(hold)
-        hold_actions.pack(fill="x", pady=(8, 0))
+        hold_actions.pack(fill="x", pady=(4, 0))
         self.add_button(hold_actions, "load_point", "載入定點", self.load_point)
         self.add_button(hold_actions, "save_point", "儲存定點", self.save_point)
+        self.add_button(hold_actions, "clear_point", "清除座標", self.clear_point)
         self.add_button(hold_actions, "hold", "開始停留", lambda: self.start("hold"))
 
         footer = ttk.Frame(body)
-        footer.pack(fill="x", pady=(12, 0))
-        self.stop_button = ttk.Button(footer, text="停止並恢復", command=self.request_stop, state="disabled")
-        self.stop_button.pack(side="left", padx=(0, 8))
-        ttk.Label(footer, textvariable=self.status, wraplength=465).pack(side="left")
+        footer.pack(fill="x", pady=(6, 0))
+        self.stop_button = self.make_button(footer, "停止並恢復", self.request_stop, "#fee2e2", "#991b1b", roomy=True, border=True)
+        self.set_button_state(self.stop_button, "disabled")
+        self.stop_button.pack(side="left", padx=(0, 5))
+        self.add_button(footer, "clear", "恢復定位", lambda: self.start("clear"))
+        ttk.Label(footer, text="斷線重接後補送", foreground="#64748b").pack(side="left", padx=2)
+        ttk.Label(body, textvariable=self.status, wraplength=430).pack(anchor="w", pady=(4, 0))
         root.after(100, self.poll)
 
+    def make_button(self, parent, label, handler, color, foreground, *, roomy=False, border=False):
+        button = tk.Button(
+            parent, text=label, command=handler, background=color, foreground=foreground,
+            activebackground=color, activeforeground=foreground, disabledforeground="#7b8492",
+            relief="solid" if border else "flat", borderwidth=1 if border else 0,
+            padx=6, pady=4 if roomy else 2,
+            font=("Noto Sans TC", 9), cursor="hand2",
+        )
+        button.normal_background = color
+        return button
+
+    def set_button_state(self, button, state):
+        button.configure(state=state, background="#e5e7eb" if state == "disabled" else button.normal_background)
+
     def add_button(self, parent, key, label, handler):
-        button = ttk.Button(parent, text=label, command=handler)
-        button.pack(side="left", padx=(0, 5))
+        color, foreground = "#dbeafe", "#1e40af"
+        if key in ("check", "reveal"):
+            color, foreground = "#e2eaf3", "#334d68"
+        elif key in ("play", "hold"):
+            color, foreground = "#dcfce7", "#166534"
+        elif key == "clear":
+            color, foreground = "#ffedd5", "#9a3412"
+        button = self.make_button(
+            parent, label, handler, color, foreground,
+            roomy=key in ("check", "reveal"), border=key == "clear",
+        )
+        button.pack(side="left", padx=(0, 3))
         self.buttons[key] = button
+
+    def clear_route(self):
+        self.route.edit_separator()
+        self.route.delete("1.0", "end")
+        self.route.edit_separator()
+        self.refresh_map()
+        self.draw_line_numbers()
+        self.status.set("已清除畫面上的路線座標。")
+
+    def clear_point(self):
+        self.hold_coordinates.set("")
+        self.status.set("已清除畫面上的定點座標。")
+
+    def create_route_editor(self, parent):
+        self.editor_panel = ttk.Frame(parent)
+        self.editor_panel.pack(fill="both", expand=True)
+        editor = ttk.Frame(self.editor_panel)
+        editor.pack(side="left", fill="both", expand=True)
+        ordering = ttk.Frame(self.editor_panel)
+        ordering.pack(side="right", fill="y", padx=(4, 0))
+        self.line_numbers = tk.Canvas(editor, width=28, height=1, background="#edf4fc", highlightthickness=0)
+        self.line_numbers.pack(side="left", fill="y")
+        scrollbar = ttk.Scrollbar(editor, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        horizontal = ttk.Scrollbar(editor, orient="horizontal")
+        horizontal.pack(side="bottom", fill="x")
+        self.route = tk.Text(
+            editor, height=5, width=1, wrap="none", undo=True, exportselection=False,
+            xscrollcommand=horizontal.set,
+            yscrollcommand=lambda first, last: self.route_scrolled(scrollbar, first, last),
+        )
+        self.route.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=self.route.yview)
+        horizontal.configure(command=self.route.xview)
+        self.route.tag_configure("route-selected", background="#dbeafe")
+        self.route.bind("<<Modified>>", self.route_text_changed)
+        self.route.bind("<Configure>", lambda _: self.draw_line_numbers())
+        self.route.bind("<ButtonRelease-1>", self.route_cursor_changed)
+        self.route.bind("<KeyRelease>", self.route_cursor_changed)
+        self.add_button(ordering, "up", "上移", lambda: self.move_route_point(-1))
+        self.add_button(ordering, "down", "下移", lambda: self.move_route_point(1))
+        self.add_button(ordering, "clear_route", "清除座標", self.clear_route)
+        for button in ordering.winfo_children():
+            button.pack_configure(side="top", fill="x", padx=0, pady=(0, 3))
+
+    def transfer_route_editor(self, source):
+        text = source.get("1.0", "end-1c")
+        if self.route.get("1.0", "end-1c") != text:
+            self.route.edit_separator()
+            self.route.replace("1.0", "end-1c", text)
+            self.route.edit_separator()
+        self.route.mark_set("insert", source.index("insert"))
+        self.route.xview_moveto(source.xview()[0])
+        self.route.yview_moveto(source.yview()[0])
+        self.route.edit_modified(False)
+        self.draw_line_numbers()
+        self.route_cursor_changed()
+
+    def toggle_editor(self):
+        if self.editor_window is not None and self.editor_window.winfo_exists():
+            self.attach_editor()
+            return
+        self.editor_window = tk.Toplevel(self.root)
+        self.editor_window.title("路線座標 · 獨立視窗")
+        self.editor_window.geometry("760x560")
+        self.editor_window.minsize(520, 300)
+        self.editor_window.protocol("WM_DELETE_WINDOW", self.attach_editor)
+        ttk.Label(
+            self.editor_window, text="可直接貼上座標；關閉此視窗即可收回主畫面。", padding=8
+        ).pack(fill="x")
+        source = self.route
+        self.docked_editor = (
+            self.editor_panel, self.route, self.line_numbers,
+            {key: self.buttons[key] for key in ("up", "down", "clear_route")},
+        )
+        self.editor_panel.pack_forget()
+        self.editor_placeholder.pack(fill="both", expand=True)
+        self.create_route_editor(self.editor_window)
+        self.editor_panel.pack_configure(padx=8, pady=(0, 8))
+        self.transfer_route_editor(source)
+        self.route.edit_reset()
+        self.buttons["detach"].configure(text="收回視窗")
+        self.editor_window.lift()
+        self.route.focus_set()
+        self.draw_line_numbers()
+
+    def attach_editor(self):
+        source = self.route
+        self.editor_panel, self.route, self.line_numbers, buttons = self.docked_editor
+        self.buttons.update(buttons)
+        for button in buttons.values():
+            self.set_button_state(button, "disabled" if self.action else "normal")
+        self.editor_placeholder.pack_forget()
+        self.editor_panel.pack(fill="both", expand=True)
+        self.transfer_route_editor(source)
+        self.buttons["detach"].configure(text="獨立視窗")
+        self.editor_window.destroy()
+        self.editor_window = None
+        self.draw_line_numbers()
 
     def open_map(self):
         try:
@@ -252,18 +394,83 @@ class RouteWindow:
             messagebox.showerror("請檢查路線", str(error), parent=self.root)
             return
         if self.route_map is None or not self.route_map.winfo_exists():
-            self.route_map = RouteMap(self.root, points, self.apply_map_route)
+            self.route_map = RouteMap(self.root, points, self.apply_map_route, on_select=self.select_route_point)
         else:
             self.route_map.set_points(points, fit=True)
         self.route_map.lift()
+        self.route_cursor_changed()
 
     def map_points(self):
         return parse_route(self.route.get("1.0", "end"), minimum_points=0, deduplicate=False)
 
     def route_text_changed(self, _event):
+        if _event.widget is not self.route:
+            return
         if self.route.edit_modified():
             self.route.edit_modified(False)
             self.refresh_map()
+            self.draw_line_numbers()
+            self.route_cursor_changed()
+
+    def route_scrolled(self, scrollbar, first, last):
+        scrollbar.set(first, last)
+        self.draw_line_numbers()
+
+    def route_line_indices(self):
+        lines = self.route.get("1.0", "end-1c").split("\n")
+        return [index for index, line in enumerate(lines, 1) if line.strip()]
+
+    def draw_line_numbers(self):
+        self.line_numbers.delete("all")
+        for number, line in enumerate(self.route_line_indices(), 1):
+            position = self.route.dlineinfo(f"{line}.0")
+            if position is not None:
+                self.line_numbers.create_text(
+                    24, position[1], anchor="ne", text=str(number), fill="#355f8c",
+                    font=self.route.cget("font"),
+                )
+
+    def route_cursor_changed(self, _event=None):
+        line = int(self.route.index("insert").split(".")[0])
+        lines = self.route_line_indices()
+        self.route.tag_remove("route-selected", "1.0", "end")
+        if line not in lines:
+            return
+        self.route.tag_add("route-selected", f"{line}.0", f"{line}.end+1c")
+        if self.route_map is not None and self.route_map.winfo_exists():
+            self.route_map.select_point(lines.index(line), reveal=True)
+
+    def select_route_point(self, index):
+        lines = self.route_line_indices()
+        if index is None or not 0 <= index < len(lines):
+            return
+        line = lines[index]
+        self.route.mark_set("insert", f"{line}.0")
+        self.route.see(f"{line}.0")
+        self.route.tag_remove("route-selected", "1.0", "end")
+        self.route.tag_add("route-selected", f"{line}.0", f"{line}.end+1c")
+        self.draw_line_numbers()
+
+    def move_route_point(self, direction):
+        lines = self.route_line_indices()
+        current = int(self.route.index("insert").split(".")[0])
+        if current not in lines:
+            return
+        index = lines.index(current)
+        target = index + direction
+        if not 0 <= target < len(lines):
+            return
+        text = self.route.get("1.0", "end-1c").split("\n")
+        destination = lines[target]
+        text[current - 1], text[destination - 1] = text[destination - 1], text[current - 1]
+        self.route.edit_separator()
+        self.route.replace("1.0", "end-1c", "\n".join(text))
+        self.route.edit_separator()
+        self.route.mark_set("insert", f"{destination}.0")
+        self.route.see("insert")
+        self.refresh_map()
+        self.draw_line_numbers()
+        self.route_cursor_changed()
 
     def refresh_map(self, *, fit=False):
         if self.route_map is None or not self.route_map.winfo_exists():
@@ -446,9 +653,9 @@ class RouteWindow:
         self.action = action
         self.stop.clear()
         for button in self.buttons.values():
-            button.configure(state="disabled")
+            self.set_button_state(button, "disabled")
         if action in ("play", "hold"):
-            self.stop_button.configure(state="normal")
+            self.set_button_state(self.stop_button, "normal")
         self.status.set("正在連接 iPhone…")
         threading.Thread(target=self.work, args=(action, points, segments), daemon=True).start()
 
@@ -465,7 +672,7 @@ class RouteWindow:
 
     def request_stop(self):
         self.stop.set()
-        self.stop_button.configure(state="disabled")
+        self.set_button_state(self.stop_button, "disabled")
         self.status.set("正在停止，請保持 iPhone 連線…")
 
     def close(self):
@@ -485,9 +692,9 @@ class RouteWindow:
                     self.status.set(text)
                 continue
             self.action = None
-            self.stop_button.configure(state="disabled")
+            self.set_button_state(self.stop_button, "disabled")
             for button in self.buttons.values():
-                button.configure(state="normal")
+                self.set_button_state(button, "normal")
             if kind == "error":
                 self.closing = False
                 self.status.set("操作未完成。請依錯誤訊息檢查。")

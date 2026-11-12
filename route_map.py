@@ -90,7 +90,7 @@ def load_tile(zoom, x, y):
 
 
 class RouteMap(tk.Toplevel):
-    def __init__(self, parent, points, on_edit, *, single=False):
+    def __init__(self, parent, points, on_edit, *, single=False, on_select=None):
         super().__init__(parent)
         self.title("選擇停留定點" if single else "PikminRoute 路線地圖")
         self.geometry("820x580")
@@ -106,19 +106,21 @@ class RouteMap(tk.Toplevel):
         self.failed = set()
         self.workers = ThreadPoolExecutor(max_workers=4)
         self.on_edit = on_edit
+        self.on_select = on_select
         self.single = single
 
         toolbar = ttk.Frame(self, padding=6)
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="+", width=4, command=lambda: self.change_zoom(1)).pack(side="left")
-        ttk.Button(toolbar, text="−", width=4, command=lambda: self.change_zoom(-1)).pack(side="left")
-        ttk.Button(toolbar, text="顯示全部路標", command=lambda: self.set_points(self.points, fit=True)).pack(
+        ttk.Style(self).configure("RouteMap.TButton", font=("Noto Sans TC", 9), padding=(6, 2))
+        ttk.Button(toolbar, text="+", width=4, style="RouteMap.TButton", command=lambda: self.change_zoom(1)).pack(side="left")
+        ttk.Button(toolbar, text="−", width=4, style="RouteMap.TButton", command=lambda: self.change_zoom(-1)).pack(side="left")
+        ttk.Button(toolbar, text="顯示全部路標", style="RouteMap.TButton", command=lambda: self.set_points(self.points, fit=True)).pack(
             side="left", padx=6
         )
         if not single:
-            self.insert_button = ttk.Button(toolbar, text="在選取點後插入", command=self.prepare_insert)
+            self.insert_button = ttk.Button(toolbar, text="在選取點後插入", style="RouteMap.TButton", command=self.prepare_insert)
             self.insert_button.pack(side="left", padx=(0, 6))
-            self.delete_button = ttk.Button(toolbar, text="刪除選取點", command=self.delete_point)
+            self.delete_button = ttk.Button(toolbar, text="刪除選取點", style="RouteMap.TButton", command=self.delete_point)
             self.delete_button.pack(side="left")
         help_text = "點一下選定位置 · 拖曳底圖移動 · 滾輪縮放" if single else (
             "點空白處新增 · 點路標選取 · 拖曳路標移動 · 拖曳底圖移動"
@@ -187,6 +189,16 @@ class RouteMap(tk.Toplevel):
         projected = self.projected_route(self.points)
         offset = round(self.center[0] - projected[0][0])
         return [((x + offset) * scale - left, y * scale - top) for x, y in projected]
+
+    def select_point(self, index, *, reveal=False):
+        if not 0 <= index < len(self.points):
+            return
+        self.selected = index
+        if reveal and self.canvas.winfo_ismapped():
+            x, y = self.point_positions()[index]
+            if not (20 <= x <= self.canvas.winfo_width() - 20 and 20 <= y <= self.canvas.winfo_height() - 20):
+                self.center = project(*self.points[index])
+        self.draw(fetch=self.canvas.winfo_ismapped())
 
     def draw(self, fetch=True):
         scale, left, top = self.origin()
@@ -289,6 +301,8 @@ class RouteMap(tk.Toplevel):
             self.center = center
         if clicked and marker is not None and self.insert_at is None:
             self.selected = marker
+            if self.on_select is not None:
+                self.on_select(marker)
         elif clicked or marker is not None:
             scale, left, top = self.origin()
             point = tuple(round(value, 7) for value in unproject((left + event.x) / scale, (top + event.y) / scale))
@@ -310,6 +324,8 @@ class RouteMap(tk.Toplevel):
             self.points = points
             self.selected = selected
             self.insert_at = None
+            if self.on_select is not None:
+                self.on_select(selected)
 
     def prepare_insert(self):
         self.insert_at = self.selected + 1
